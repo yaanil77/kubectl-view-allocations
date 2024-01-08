@@ -4,7 +4,7 @@
 //!
 //! ```rust
 //! use kubectl_view_allocations::tree::provide_prefix;
-//! 
+//!
 //! let items = vec![
 //!     "1/2",
 //!     "1/2/3",
@@ -71,7 +71,7 @@ fn level_to_string(level: &[bool]) -> String {
     prefix
 }
 
-fn write_tree_level_of_children(nodes: &mut Vec<TreeNode>, idx: usize) {
+fn write_tree_level_of_children(nodes: &mut [TreeNode], idx: usize) {
     if let Some(node) = nodes.get(idx) {
         let treenode = node.clone();
         let mut d = treenode.children.len();
@@ -141,8 +141,8 @@ mod tests {
         let items = vec!["1/2", "1/2/3", "1/2/3/4", "1/2/5", "6", "7", "7/8", "7/9"];
 
         let prefixes = provide_prefix(&items, |parent, item| {
-            let pi = item.split("/");
-            let pp = parent.split("/");
+            let pi = item.split('/');
+            let pp = parent.split('/');
             (pi.count() == pp.count() + 1) && item.starts_with(parent)
         });
 

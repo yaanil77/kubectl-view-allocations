@@ -1,8 +1,8 @@
 [package]
 name = "kubectl-view-allocations"
-version = "0.14.7-dev"
+version = "0.18.1"
 authors = ["David Bernard"]
-edition = "2018"
+edition = "2021"
 description = "kubectl plugin to list allocations (cpu, memory, gpu,... X utilization, requested, limit, allocatable,...)"
 readme = "README.md"
 license = "CC0-1.0"
@@ -12,36 +12,38 @@ homepage = "https://github.com/davidB/kubectl-view-allocations"
 exclude = ["/.github", ".gitignore"]
 
 [dependencies]
-tokio = { version = "1.6", features = ["full"], optional = true }
-kube = { version = "0.60", features = [
+chrono = "0.4"
+clap = { version = "4.2", features = ["derive"] }
+color-eyre = "0.6.2"
+itertools = "0.12"
+k8s-openapi = { version = "0.20.0", default-features = false }
+kube = { version = "0.87", features = [
     "client",
     "oauth",
     "gzip",
-    "native-tls",
+    "rustls-tls",
 ], default-features = false }
-k8s-openapi = { version = "0.13", default-features = false }
-thiserror = "1.0"
+prettytable-rs = { version = "0.10", default-features = false, optional = true }
 serde = "1.0"
 serde_json = "1.0"
-itertools = "0.10"
-prettytable-rs = { version = "0.8", default-features = false, optional = true }
-structopt = "0.3"
-openssl = { version = "0.10", features = ["vendored"] }
-chrono = "0.4"
+thiserror = "1.0"
+tokio = { version = "1.6", features = ["full"], optional = true }
 tracing = "0.1"
-tracing-bunyan-formatter = { version = "0.2", optional = true }
-tracing-subscriber = { version = "0.2", optional = true }
+tracing-bunyan-formatter = { version = "0.3", optional = true }
+tracing-error = "0.2.0"
+tracing-subscriber = { version = "0.3", optional = true, default-features = false, features = [
+    "env-filter",
+] }
 
 [features]
 default = ["cli"]
 cli = [
-    "tokio",
-    "k8s-openapi/v1_16",
-    "tracing-subscriber",
-    "tracing-bunyan-formatter",
+    "dep:tokio",
+    "k8s-openapi/v1_22",
+    "dep:tracing-subscriber",
     "prettytable",
 ]
-prettytable = ["prettytable-rs"]
+prettytable = ["dep:prettytable-rs"]
 
 [[bin]]
 name = "kubectl-view-allocations"
@@ -52,11 +54,15 @@ doc = false
 required-features = ["cli"]
 
 [dev-dependencies]
-spectral = "0.6.0"
-anyhow = "1.0"
+anyhow = "1"
+pretty_assertions = "1"
 
 [profile.release]
 lto = true
 panic = 'abort'
 opt-level = 'z'   # Optimize for size.
 codegen-units = 1
+strip = true
+
+[profile.dev.package.backtrace]
+opt-level = 3

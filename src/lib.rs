@@ -4,18 +4,16 @@ pub mod tree;
 
 // mod human_format;
 use chrono::prelude::*;
+use clap::{Parser, ValueEnum};
 use core::convert::TryFrom;
 use itertools::Itertools;
 use k8s_openapi::api::core::v1::{Node, Pod};
 use kube::api::{Api, ListParams, ObjectList};
 #[cfg(feature = "prettytable")]
-use prettytable::{cell, format, row, Cell, Row, Table};
+use prettytable::{format, row, Cell, Row, Table};
 use qty::Qty;
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use structopt::clap::arg_enum;
-use structopt::clap::AppSettings;
-use structopt::StructOpt;
 use tracing::{info, instrument, warn};
 
 #[derive(thiserror::Error, Debug)]
@@ -46,6 +44,18 @@ pub enum Error {
     KubeError {
         context: String,
         source: kube::Error,
+    },
+
+    #[error("Failed to {context}")]
+    KubeConfigError {
+        context: String,
+        source: kube::config::KubeconfigError,
+    },
+
+    #[error("Failed to {context}")]
+    KubeInferConfigError {
+        context: String,
+        source: kube::config::InferConfigError,
     },
 }
 
@@ -315,7 +325,7 @@ pub async fn collect_from_pods(
     namespace: &Option<String>,
 ) -> Result<(), Error> {
     let api_pods: Api<Pod> = if let Some(ns) = namespace {
-        Api::namespaced(client, &ns)
+        Api::namespaced(client, ns)
     } else {
         Api::all(client)
     };
@@ -376,8 +386,8 @@ pub async fn extract_allocatable_from_pods(
         }
         // handler overhead (add to both requests and limits)
         if let Some(ref overhead) = spec.and_then(|s| s.overhead.clone()) {
-            process_resources(&mut resource_requests, &overhead, std::ops::Add::add)?;
-            process_resources(&mut resource_limits, &overhead, std::ops::Add::add)?;
+            process_resources(&mut resource_requests, overhead, std::ops::Add::add)?;
+            process_resources(&mut resource_limits, overhead, std::ops::Add::add)?;
         }
         // push these onto resources
         push_resources(
@@ -490,15 +500,13 @@ pub async fn extract_utilizations_from_pod_metrics(
     Ok(())
 }
 
-arg_enum! {
-    #[derive(Debug, Eq, PartialEq)]
-    #[allow(non_camel_case_types)]
-    pub enum GroupBy {
-        resource,
-        node,
-        pod,
-        namespace,
-    }
+#[derive(Debug, Eq, PartialEq, ValueEnum, Clone)]
+#[allow(non_camel_case_types)]
+pub enum GroupBy {
+    resource,
+    node,
+    pod,
+    namespace,
 }
 
 impl GroupBy {
@@ -532,47 +540,73 @@ impl GroupBy {
     }
 }
 
-arg_enum! {
-    #[derive(Debug, Eq, PartialEq)]
-    #[allow(non_camel_case_types)]
-    pub enum Output {
-        table,
-        csv,
+impl std::fmt::Display for GroupBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Self::resource => "resource",
+            Self::node => "node",
+            Self::pod => "pod",
+            Self::namespace => "namespace",
+        };
+        f.write_str(s)
     }
 }
 
-#[derive(StructOpt, Debug)]
-#[structopt(
-    global_settings(&[AppSettings::ColoredHelp, AppSettings::VersionlessSubcommands]),
-    author = env!("CARGO_PKG_HOMEPAGE"), about
+#[derive(Debug, Eq, PartialEq, ValueEnum, Clone)]
+#[allow(non_camel_case_types)]
+pub enum Output {
+    table,
+    csv,
+}
+
+#[derive(Parser, Debug)]
+#[command(
+    version, about,
+    after_help(env!("CARGO_PKG_HOMEPAGE")),
+    propagate_version = true
 )]
 pub struct CliOpts {
     /// The name of the kubeconfig context to use
-    #[structopt(long)]
+    #[arg(long, value_parser)]
     pub context: Option<String>,
 
     /// Show only pods from this namespace
-    #[structopt(short, long)]
+    #[arg(short, long, value_parser)]
     pub namespace: Option<String>,
 
     /// Force to retrieve utilization (for cpu and memory), require to have metrics-server https://github.com/kubernetes-sigs/metrics-server
-    #[structopt(short = "u", long)]
+    #[arg(short = 'u', long, value_parser)]
     pub utilization: bool,
 
     /// Show lines with zero requested and zero limit and zero allocatable
-    #[structopt(short = "z", long)]
+    #[arg(short = 'z', long, value_parser)]
     pub show_zero: bool,
 
+    /// pre-check access and refersh token on kubeconfig by running `kubectl cluster-info`
+    #[arg(long, value_parser)]
+    pub precheck: bool,
+
+    /// accept invalid certificats (dangerous)
+    #[arg(long, value_parser)]
+    pub accept_invalid_certs: bool,
+
     /// Filter resources shown by name(s), by default all resources are listed
-    #[structopt(short, long)]
+    #[arg(short, long, value_parser)]
     pub resource_name: Vec<String>,
 
     /// Group information hierarchically (default: -g resource -g node -g pod)
-    #[structopt(short, long, possible_values = &GroupBy::variants(), case_insensitive = true)]
+    #[arg(short, long, value_enum, ignore_case = true, value_parser)]
     pub group_by: Vec<GroupBy>,
 
     /// Output format
-    #[structopt(short, long, possible_values = &Output::variants(), case_insensitive = true, default_value = "table")]
+    #[arg(
+        short,
+        long,
+        value_enum,
+        ignore_case = true,
+        default_value = "table",
+        value_parser
+    )]
     pub output: Output,
 }
 
@@ -600,25 +634,28 @@ pub async fn refresh_kube_config(cli_opts: &CliOpts) -> Result<(), Error> {
 }
 
 pub async fn new_client(cli_opts: &CliOpts) -> Result<kube::Client, Error> {
-    refresh_kube_config(cli_opts).await?;
-    let client_config = match cli_opts.context {
+    if cli_opts.precheck {
+        refresh_kube_config(cli_opts).await?;
+    }
+    let mut client_config = match cli_opts.context {
         Some(ref context) => kube::Config::from_kubeconfig(&kube::config::KubeConfigOptions {
             context: Some(context.clone()),
             ..Default::default()
         })
         .await
-        .map_err(|source| Error::KubeError {
+        .map_err(|source| Error::KubeConfigError {
             context: "create the kube client config".to_string(),
             source,
         })?,
         None => kube::Config::infer()
             .await
-            .map_err(|source| Error::KubeError {
+            .map_err(|source| Error::KubeInferConfigError {
                 context: "create the kube client config".to_string(),
                 source,
             })?,
     };
     info!(cluster_url = client_config.cluster_url.to_string().as_str());
+    client_config.accept_invalid_certs = cli_opts.accept_invalid_certs;
     kube::Client::try_from(client_config).map_err(|source| Error::KubeError {
         context: "create the kube client".to_string(),
         source,
@@ -717,7 +754,7 @@ fn add_cells_for_cvs(row: &mut Vec<String>, oqty: &Option<Qty>, o100: &Option<Qt
             row.push(format!("{:.2}", f64::from(qty)));
             row.push(match o100 {
                 None => "".to_string(),
-                Some(q100) => format!("{:.0}%", qty.calc_percentage(&q100)),
+                Some(q100) => format!("{:.0}%", qty.calc_percentage(q100)),
             });
         }
     };
@@ -801,6 +838,8 @@ pub fn display_with_prettytable(
                 row.remove_cell(1);
             }
             table.add_row(row);
+        } else {
+            table.add_row(Row::new(vec![Cell::new(&column0)]));
         }
     }
 
@@ -834,14 +873,11 @@ mod tests {
 
     #[test]
     fn test_accept_resource() {
-        assert_eq!(accept_resource("cpu", &vec![]), true);
-        assert_eq!(accept_resource("cpu", &vec!["c".to_string()]), true);
-        assert_eq!(accept_resource("cpu", &vec!["cpu".to_string()]), true);
-        assert_eq!(accept_resource("cpu", &vec!["cpu3".to_string()]), false);
-        assert_eq!(accept_resource("gpu", &vec!["gpu".to_string()]), true);
-        assert_eq!(
-            accept_resource("nvidia.com/gpu", &vec!["gpu".to_string()]),
-            true
-        );
+        assert!(accept_resource("cpu", &[]));
+        assert!(accept_resource("cpu", &["c".to_string()]));
+        assert!(accept_resource("cpu", &["cpu".to_string()]));
+        assert!(!accept_resource("cpu", &["cpu3".to_string()]));
+        assert!(accept_resource("gpu", &["gpu".to_string()]));
+        assert!(accept_resource("nvidia.com/gpu", &["gpu".to_string()]));
     }
 }
